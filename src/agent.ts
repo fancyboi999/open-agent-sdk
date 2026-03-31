@@ -184,6 +184,7 @@ export class Agent {
   private tools: Tools
   private resolvedModel: string
   private mcpClients: any[]
+  private activeAbortController: AbortController | null = null
   private _initialized: Promise<void>
 
   constructor(options: AgentOptions) {
@@ -316,8 +317,9 @@ export class Agent {
       // Commands may fail to load in some environments
     }
 
-    // Create abort controller
+    // Create abort controller and track it for external abort()
     const abortController = new AbortController()
+    this.activeAbortController = abortController
     if (opts.abortSignal) {
       opts.abortSignal.addEventListener('abort', () => abortController.abort(), { once: true })
     }
@@ -368,7 +370,11 @@ export class Agent {
       jsonSchema: opts.jsonSchema,
     })
 
-    yield* generator
+    try {
+      yield* generator
+    } finally {
+      this.activeAbortController = null
+    }
   }
 
   /**
@@ -435,7 +441,30 @@ export class Agent {
    * Abort the current operation.
    */
   abort(): void {
-    // Will be implemented when we track the active abort controller
+    if (this.activeAbortController) {
+      this.activeAbortController.abort()
+      this.activeAbortController = null
+    }
+  }
+
+  /**
+   * Clean up all resources: abort any in-flight query and disconnect MCP servers.
+   * Call this when the agent is no longer needed.
+   */
+  async dispose(): Promise<void> {
+    this.abort()
+    for (const connection of this.mcpClients) {
+      try {
+        if (connection.cleanup) {
+          await connection.cleanup()
+        } else if (connection.client?.close) {
+          await connection.client.close()
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+    this.mcpClients = []
   }
 }
 
